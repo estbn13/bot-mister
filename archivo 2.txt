@@ -1,0 +1,3109 @@
+export default ConversationPanel;
+
+## 📦 ACTUALIZACIÓN DE ARCHIVOS PRINCIPALES
+
+### 📦 backend/package.json (actualización)
+
+```json
+{
+  "name": "botbuilder-backend",
+  "version": "2.0.0",
+  "description": "Backend for BotBuilder Platform with Advanced Features",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "worker": "node workers/webhookWorker.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.5.0",
+    "bcryptjs": "^2.4.3",
+    "bull": "^4.11.5",
+    "cors": "^2.8.5",
+    "date-fns": "^3.0.6",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-validator": "^7.0.1",
+    "ioredis": "^5.3.2",
+    "jszip": "^3.10.1",
+    "jsonwebtoken": "^9.0.2",
+    "moment": "^2.29.4",
+    "mongoose": "^8.0.3",
+    "multer": "^1.4.5-lts.1",
+    "nodemailer": "^6.9.7",
+    "openai": "^4.24.1",
+    "pino": "^8.17.2",
+    "qrcode": "^1.5.3",
+    "socket.io": "^4.6.1",
+    "twilio": "^4.19.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
+```
+
+### 📦 backend/server.js (actualización)
+
+```javascript
+const express = require('express');
+const cors = require('cors');
+const dotenv = require('dotenv');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
+const connectDB = require('./config/database');
+const { connectRedis } = require('./config/redis');
+const errorHandler = require('./middleware/errorHandler');
+const RealtimeService = require('./services/realtimeService');
+const webhookService = require('./services/webhookService');
+
+// Load environment variables
+dotenv.config();
+
+// Initialize Express app
+const app = express();
+const httpServer = createServer(app);
+
+// Initialize Socket.io
+const io = new Server(httpServer, {
+  cors: {
+    origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+    methods: ['GET', 'POST']
+  }
+});
+
+// Make io accessible throughout the app
+app.set('io', io);
+global.io = io;
+
+// Initialize Realtime Service
+const realtimeService = new RealtimeService(io);
+app.set('realtimeService', realtimeService);
+
+// Middleware
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  credentials: true
+}));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Routes
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/bots', require('./routes/bots'));
+app.use('/api/flows', require('./routes/flows'));
+app.use('/api/whatsapp', require('./routes/whatsapp'));
+app.use('/api/analytics', require('./routes/analytics'));
+app.use('/api/templates', require('./routes/templates'));
+app.use('/api/webhooks', require('./routes/webhooks'));
+app.use('/api/export', require('./routes/export'));
+
+// Health check
+app.get('/api/health', (req, res) => {
+  const mongoose = require('mongoose');
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    services: {
+      mongodb: mongoose.connection.readyState === 1,
+      redis: global.redisClient?.status === 'ready',
+      websocket: io.engine.clientsCount || 0
+    }
+  });
+});
+
+// Error handler
+app.use(errorHandler);
+
+// Start server
+const PORT = process.env.PORT || 3001;
+
+const startServer = async () => {
+  try {
+    // Connect to MongoDB
+    await connectDB();
+    console.log('✅ MongoDB connected');
+    
+    // Connect to Redis
+    await connectRedis();
+    console.log('✅ Redis connected');
+    
+    // Restore WhatsApp sessions
+    const WhatsAppService = require('./services/whatsappService');
+    const whatsappService = WhatsAppService.getInstance();
+    await whatsappService.restoreAllSessions();
+    console.log('✅ WhatsApp sessions restored');
+    
+    // Start listening
+    httpServer.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`📡 WebSocket server ready`);
+      console.log(`📊 Analytics enabled`);
+      console.log(`🔗 Webhooks enabled`);
+      console.log(`💬 Realtime chat enabled`);
+    });
+  } catch (error) {
+    console.error('❌ Server startup error:', error);
+    process.exit(1);
+  }
+};
+
+startServer();
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled Promise Rejection:', err);
+  httpServer.close(() => process.exit(1));
+});
+```
+
+### 📦 backend/routes/analytics.js
+
+```javascript
+const router = require('express').Router();
+const analyticsController = require('../controllers/analyticsController');
+const auth = require('../middleware/auth');
+
+// Dashboard metrics
+router.get('/dashboard', auth, analyticsController.getDashboardMetrics);
+
+// Bot analytics
+router.get('/bots/:botId', auth, analyticsController.getBotAnalytics);
+
+// Conversations
+router.get('/conversations/:botId', auth, analyticsController.getConversations);
+router.get('/conversations/detail/:conversationId', auth, analyticsController.getConversationDetail);
+
+// Export data
+router.get('/export/:botId', auth, analyticsController.exportAnalytics);
+
+module.exports = router;
+```
+
+### 📦 backend/routes/templates.js
+
+```javascript
+const router = require('express').Router();
+const templateService = require('../services/templateService');
+const auth = require('../middleware/auth');
+
+// Get default templates
+router.get('/default', auth, async (req, res) => {
+  try {
+    const templates = await templateService.getDefaultTemplates();
+    res.json({ success: true, templates });
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching templates' });
+  }
+});
+
+// Get template recommendations
+router.get('/recommendations', auth, async (req, res) => {
+  try {
+    const { category } = req.query;
+    const templates = await templateService.getRecommendations(req.userId, category);
+    res.json({ success: true, templates });
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching recommendations' });
+  }
+});
+
+// Create flow from template
+router.post('/:templateId/create-flow', auth, async (req, res) => {
+  try {
+    const flow = await templateService.createFlowFromTemplate(
+      req.params.templateId,
+      req.userId,
+      req.body
+    );
+    res.json({ success: true, flow });
+  } catch (error) {
+    res.status(500).json({ error: 'Error creating flow from template' });
+  }
+});
+
+module.exports = router;
+```
+
+### 📦 backend/routes/webhooks.js
+
+```javascript
+const router = require('express').Router();
+const Webhook = require('../models/Webhook');
+const webhookService = require('../services/webhookService');
+const auth = require('../middleware/auth');
+
+// Get user's webhooks
+router.get('/', auth, async (req, res) => {
+  try {
+    const webhooks = await Webhook.find({ user: req.userId });
+    res.json({ success: true, webhooks });
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching webhooks' });
+  }
+});
+
+// Create webhook
+router.post('/', auth, async (req, res) => {
+  try {
+    const webhook = new Webhook({
+      user: req.userId,
+      ...req.body
+    });
+    await webhook.save();
+    res.json({ success: true, webhook });
+  } catch (error) {
+    res.status(500).json({ error: 'Error creating webhook' });
+  }
+});
+
+// Update webhook
+router.put('/:id', auth, async (req, res) => {
+  try {
+    const webhook = await Webhook.findOneAndUpdate(
+      { _id: req.params.id, user: req.userId },
+      req.body,
+      { new: true }
+    );
+    res.json({ success: true, webhook });
+  } catch (error) {
+    res.status(500).json({ error: 'Error updating webhook' });
+  }
+});
+
+// Delete webhook
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    await Webhook.findOneAndDelete({ _id: req.params.id, user: req.userId });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Error deleting webhook' });
+  }
+});
+
+// Test webhook
+router.post('/:id/test', auth, async (req, res) => {
+  try {
+    const result = await webhookService.executeWebhook(
+      req.params.id,
+      'test',
+      { message: 'Test webhook call' }
+    );
+    res.json({ success: true, result });
+  } catch (error) {
+    res.status(500).json({ error: 'Error testing webhook' });
+  }
+});
+
+module.exports = router;
+```
+
+### 📦 backend/routes/export.js
+
+```javascript
+const router = require('express').Router();
+const flowExportService = require('../services/flowExportService');
+const auth = require('../middleware/auth');
+const multer = require('multer');
+
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
+
+// Export single flow
+router.get('/flow/:flowId', auth, async (req, res) => {
+  try {
+    const result = await flowExportService.exportFlowAsJSON(
+      req.params.flowId,
+      req.userId
+    );
+    
+    res.setHeader('Content-Type', result.mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.send(result.data);
+  } catch (error) {
+    res.status(500).json({ error: 'Error exporting flow' });
+  }
+});
+
+// Export multiple flows
+router.post('/flows', auth, async (req, res) => {
+  try {
+    const { flowIds } = req.body;
+    const result = await flowExportService.exportFlowsAsZip(flowIds, req.userId);
+    
+    res.setHeader('Content-Type', result.mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.send(result.data);
+  } catch (error) {
+    res.status(500).json({ error: 'Error exporting flows' });
+  }
+});
+
+// Export bot configuration
+router.get('/bot/:botId', auth, async (req, res) => {
+  try {
+    const result = await flowExportService.exportBotConfiguration(
+      req.params.botId,
+      req.userId
+    );
+    
+    res.setHeader('Content-Type', result.mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.send(result.data);
+  } catch (error) {
+    res.status(500).json({ error: 'Error exporting bot configuration' });
+  }
+});
+
+// Import flow
+router.post('/import/flow', auth, upload.single('file'), async (req, res) => {
+  try {
+    const jsonData = req.file.buffer.toString('utf-8');
+    const flow = await flowExportService.importFlowFromJSON(jsonData, req.userId);
+    res.json({ success: true, flow });
+  } catch (error) {
+    res.status(500).json({ error: 'Error importing flow' });
+  }
+});
+
+// Import bot configuration
+router.post('/import/bot', auth, upload.single('file'), async (req, res) => {
+  try {
+    const jsonData = req.file.buffer.toString('utf-8');
+    const bot = await flowExportService.importBotConfiguration(jsonData, req.userId);
+    res.json({ success: true, bot });
+  } catch (error) {
+    res.status(500).json({ error: 'Error importing bot configuration' });
+  }
+});
+
+module.exports = router;
+
+## 📦 frontend/src/components/Analytics/AnalyticsDashboard.js
+
+```javascript
+import React, { useState, useEffect } from 'react';
+import {
+  Box,
+  Grid,
+  Card,
+  CardContent,
+  Typography,
+  Paper,
+  Select,
+  MenuItem,
+  FormControl,
+  InputLabel,
+  Button,
+  LinearProgress,
+  Chip,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow
+} from '@mui/material';
+import {
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
+  PieChart,
+  Pie,
+  Cell,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer
+} from 'recharts';
+import {
+  TrendingUp as TrendingUpIcon,
+  TrendingDown as TrendingDownIcon,
+  Download as DownloadIcon,
+  Refresh as RefreshIcon
+} from '@mui/icons-material';
+import api from '../../services/api';
+import { format } from 'date-fns';
+import { es } from 'date-fns/locale';
+
+const AnalyticsDashboard = ({ botId }) => {
+  const [loading, setLoading] = useState(true);
+  const [dateRange, setDateRange] = useState('week');
+  const [metrics, setMetrics] = useState(null);
+  const [report, setReport] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  useEffect(() => {
+    if (botId) {
+      fetchBotAnalytics();
+    } else {
+      fetchDashboardMetrics();
+    }
+  }, [botId, dateRange]);
+
+  const fetchDashboardMetrics = async () => {
+    try {
+      setLoading(true);
+      const response = await api.get(`/analytics/dashboard?dateRange=${dateRange}`);
+      setMetrics(response.data.metrics);
+    } catch (error) {
+      console.error('Error fetching dashboard metrics:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchBotAnalytics = async () => {
+    try {
+      setLoading(true);
+      const endDate = new Date();
+      const startDate = new Date();
+      
+      switch (dateRange) {
+        case 'day':
+          startDate.setDate(startDate.getDate() - 1);
+          break;
+        case 'week':
+          startDate.setDate(startDate.getDate() - 7);
+          break;
+        case 'month':
+          startDate.setMonth(startDate.getMonth() - 1);
+          break;
+        default:
+          startDate.setDate(startDate.getDate() - 7);
+      }
+
+      const response = await api.get(`/analytics/bots/${botId}`, {
+        params: {
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString()
+        }
+      });
+      
+      setReport(response.data.report);
+    } catch (error) {
+      console.error('Error fetching bot analytics:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    if (botId) {
+      await fetchBotAnalytics();
+    } else {
+      await fetchDashboardMetrics();
+    }
+    setRefreshing(false);
+  };
+
+  const exportAnalytics = async (format = 'json') => {
+    try {
+      const response = await api.get(`/analytics/export/${botId}`, {
+        params: { format },
+        responseType: format === 'csv' ? 'blob' : 'json'
+      });
+
+      // Create download link
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `analytics_${botId}_${Date.now()}.${format}`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      console.error('Error exporting analytics:', error);
+    }
+  };
+
+  const MetricCard = ({ title, value, change, icon, color }) => (
+    <Card>
+      <CardContent>
+        <Box display="flex" justifyContent="space-between" alignItems="center">
+          <Box>
+            <Typography color="textSecondary" gutterBottom variant="body2">
+              {title}
+            </Typography>
+            <Typography variant="h4">
+              {typeof value === 'number' ? value.toLocaleString() : value}
+            </Typography>
+            {change !== undefined && (
+              <Box display="flex" alignItems="center" mt={1}>
+                {change > 0 ? (
+                  <TrendingUpIcon sx={{ color: 'success.main', mr: 0.5 }} />
+                ) : (
+                  <TrendingDownIcon sx={{ color: 'error.main', mr: 0.5 }} />
+                )}
+                <Typography
+                  variant="body2"
+                  color={change > 0 ? 'success.main' : 'error.main'}
+                >
+                  {Math.abs(change)}%
+                </Typography>
+              </Box>
+            )}
+          </Box>
+          <Box
+            sx={{
+              backgroundColor: `${color}.100`,
+              borderRadius: 2,
+              p: 1.5,
+              display: 'flex'
+            }}
+          >
+            {icon}
+          </Box>
+        </Box>
+      </CardContent>
+    </Card>
+  );
+
+  if (loading) {
+    return <LinearProgress />;
+  }
+
+  const data = metrics || report;
+  if (!data) {
+    return <Typography>No hay datos disponibles</Typography>;
+  }
+
+  // Prepare chart data
+  const hourlyData = metrics?.messagesByHour?.map((count, hour) => ({
+    hour: `${hour}:00`,
+    messages: count
+  })) || [];
+
+  const satisfactionData = report?.satisfaction ? [
+    { name: 'Positivo', value: report.satisfaction.positive, color: '#4caf50' },
+    { name: 'Neutral', value: report.satisfaction.neutral, color: '#ff9800' },
+    { name: 'Negativo', value: report.satisfaction.negative, color: '#f44336' }
+  ] : [];
+
+  return (
+    <Box>
+      {/* Header */}
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
+        <Typography variant="h5">
+          {botId ? 'Análisis del Bot' : 'Panel de Análisis'}
+        </Typography>
+        <Box display="flex" gap={2}>
+          <FormControl size="small" sx={{ minWidth: 120 }}>
+            <InputLabel>Período</InputLabel>
+            <Select
+              value={dateRange}
+              onChange={(e) => setDateRange(e.target.value)}
+              label="Período"
+            >
+              <MenuItem value="day">Último día</MenuItem>
+              <MenuItem value="week">Última semana</MenuItem>
+              <MenuItem value="month">Último mes</MenuItem>
+            </Select>
+          </FormControl>
+          <Button
+            variant="outlined"
+            startIcon={<RefreshIcon />}
+            onClick={handleRefresh}
+            disabled={refreshing}
+          >
+            Actualizar
+          </Button>
+          {botId && (
+            <>
+              <Button
+                variant="outlined"
+                startIcon={<DownloadIcon />}
+                onClick={() => exportAnalytics('json')}
+              >
+                JSON
+              </Button>
+              <Button
+                variant="outlined"
+                startIcon={<DownloadIcon />}
+                onClick={() => exportAnalytics('csv')}
+              >
+                CSV
+              </Button>
+            </>
+          )}
+        </Box>
+      </Box>
+
+      {/* Metric Cards */}
+      <Grid container spacing={3} sx={{ mb: 3 }}>
+        <Grid item xs={12} sm={6} md={3}>
+          <MetricCard
+            title="Total de Mensajes"
+            value={metrics?.totalMessages || report?.summary?.totalMessages || 0}
+            change={12}
+            color="primary"
+            icon={<Typography variant="h6">💬</Typography>}
+          />
+        </Grid>
+        <Grid item xs={12} sm={6} md={3}>
+          <MetricCard
+            title="Usuarios Únicos"
+            value={metrics?.uniqueUsers || report?.summary?.uniqueUsers || 0}
+            change={8}
+            color="success"
+            icon={<Typography variant="h6">👥</Typography>}
+          />
+        </Grid>
+        <Grid item xs={12} sm={6} md={3}>
+          <MetricCard
+            title="Flujos Completados"
+            value={metrics?.completedFlows || report?.summary?.completionRate || 0}
+            change={-3}
+            color="warning"
+            icon={<Typography variant="h6">✅</Typography>}
+          />
+        </Grid>
+        <Grid item xs={12} sm={6} md={3}>
+          <MetricCard
+            title="Satisfacción"
+            value={`${report?.satisfaction?.score || 85}%`}
+            change={5}
+            color="info"
+            icon={<Typography variant="h6">⭐</Typography>}
+          />
+        </Grid>
+      </Grid>
+
+      {/* Charts */}
+      <Grid container spacing={3} sx={{ mb: 3 }}>
+        {/* Messages by Hour Chart */}
+        <Grid item xs={12} md={8}>
+          <Paper sx={{ p: 2 }}>
+            <Typography variant="h6" gutterBottom>
+              Mensajes por Hora
+            </Typography>
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={hourlyData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="hour" />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Line 
+                  type="monotone" 
+                  dataKey="messages" 
+                  stroke="#25D366" 
+                  name="Mensajes"
+                  strokeWidth={2}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </Paper>
+        </Grid>
+
+        {/* Satisfaction Pie Chart */}
+        <Grid item xs={12} md={4}>
+          <Paper sx={{ p: 2 }}>
+            <Typography variant="h6" gutterBottom>
+              Satisfacción del Usuario
+            </Typography>
+            <ResponsiveContainer width="100%" height={300}>
+              <PieChart>
+                <Pie
+                  data={satisfactionData}
+                  cx="50%"
+                  cy="50%"
+                  labelLine={false}
+                  label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                  outerRadius={80}
+                  fill="#8884d8"
+                  dataKey="value"
+                >
+                  {satisfactionData.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+          </Paper>
+        </Grid>
+      </Grid>
+
+      {/* Flow Performance Table */}
+      {report?.flowAnalysis && (
+        <Paper sx={{ p: 2 }}>
+          <Typography variant="h6" gutterBottom>
+            Rendimiento de Flujos
+          </Typography>
+          <TableContainer>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell>Flujo</TableCell>
+                  <TableCell align="right">Ejecuciones</TableCell>
+                  <TableCell align="right">Completados</TableCell>
+                  <TableCell align="right">Tasa de Éxito</TableCell>
+                  <TableCell align="right">Duración Promedio</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {Object.values(report.flowAnalysis).map((flow, index) => (
+                  <TableRow key={index}>
+                    <TableCell>{flow.name}</TableCell>
+                    <TableCell align="right">{flow.executions}</TableCell>
+                    <TableCell align="right">{flow.completions}</TableCell>
+                    <TableCell align="right">
+                      <Chip
+                        label={`${((flow.completions / flow.executions) * 100).toFixed(1)}%`}
+                        color={flow.completions / flow.executions > 0.7 ? 'success' : 'warning'}
+                        size="small"
+                      />
+                    </TableCell>
+                    <TableCell align="right">
+                      {(flow.avgDuration / 1000).toFixed(1)}s
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Paper>
+      )}
+    </Box>
+  );
+};
+
+export default AnalyticsDashboard;
+
+## 📦 frontend/package.json (actualización)
+
+```json
+{
+  "name": "botbuilder-frontend",
+  "version": "2.0.0",
+  "private": true,
+  "dependencies": {
+    "@emotion/react": "^11.11.3",
+    "@emotion/styled": "^11.11.0",
+    "@mui/icons-material": "^5.15.3",
+    "@mui/material": "^5.15.3",
+    "@mui/x-data-grid": "^6.18.7",
+    "axios": "^1.6.5",
+    "date-fns": "^3.0.6",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-flow-renderer": "^10.3.17",
+    "react-qr-code": "^2.0.12",
+    "react-router-dom": "^6.21.1",
+    "react-scripts": "5.0.1",
+    "recharts": "^2.10.4",
+    "socket.io-client": "^4.6.1"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "proxy": "http://localhost:3001"
+}
+```
+
+## 📦 docker-compose.yml (actualización)
+
+```yaml
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: botbuilder-mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-secretpass}
+      MONGO_INITDB_DATABASE: botbuilder
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - botbuilder-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: botbuilder-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redispass}
+    volumes:
+      - redis_data:/data
+    networks:
+      - botbuilder-network
+
+  backend:
+    build: ./backend
+    container_name: botbuilder-backend
+    restart: always
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3001
+      MONGODB_URI: mongodb://${MONGO_USER:-admin}:${MONGO_PASSWORD:-secretpass}@mongodb:27017/botbuilder?authSource=admin
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redispass}
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key}
+      CORS_ORIGIN: http://localhost:3000
+      # Email service
+      EMAIL_SERVICE: ${EMAIL_SERVICE:-gmail}
+      EMAIL_USER: ${EMAIL_USER}
+      EMAIL_PASSWORD: ${EMAIL_PASSWORD}
+      EMAIL_FROM: ${EMAIL_FROM}
+      # SMS service (Twilio)
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER}
+      # AI service (OpenAI)
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+      - whatsapp_sessions:/app/sessions
+      - uploads:/app/uploads
+    networks:
+      - botbuilder-network
+
+  frontend:
+    build: ./frontend
+    container_name: botbuilder-frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:3001/api
+      REACT_APP_SOCKET_URL: http://localhost:3001
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - botbuilder-network
+
+  # Worker for processing webhooks (optional)
+  webhook-worker:
+    build: ./backend
+    container_name: botbuilder-webhook-worker
+    restart: always
+    command: npm run worker
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      MONGODB_URI: mongodb://${MONGO_USER:-admin}:${MONGO_PASSWORD:-secretpass}@mongodb:27017/botbuilder?authSource=admin
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redispass}
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - botbuilder-network
+
+volumes:
+  mongo_data:
+  redis_data:
+  whatsapp_sessions:
+  uploads:
+
+networks:
+  botbuilder-network:
+    driver: bridge
+```
+
+## 📦 .env.example (actualización)
+
+```env
+# MongoDB
+MONGO_USER=admin
+MONGO_PASSWORD=secretpass
+
+# Redis
+REDIS_PASSWORD=redispass
+
+# JWT
+JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
+
+# Environment
+NODE_ENV=production
+
+# Email Service (Gmail example)
+EMAIL_SERVICE=gmail
+EMAIL_USER=your-email@gmail.com
+EMAIL_PASSWORD=your-app-password
+EMAIL_FROM=BotBuilder Platform <your-email@gmail.com>
+
+# SMS Service (Twilio)
+TWILIO_ACCOUNT_SID=your-twilio-account-sid
+TWILIO_AUTH_TOKEN=your-twilio-auth-token
+TWILIO_PHONE_NUMBER=+1234567890
+
+# AI Service (OpenAI)
+OPENAI_API_KEY=your-openai-api-key
+
+# Webhook Security
+WEBHOOK_SECRET=your-webhook-secret
+```      await this.emailTransporter.sendMail(mailOptions);
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error executing email node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute SMS node
+  async executeSmsNode(node, context) {
+    try {
+      const { smsTo, smsBody } = node.data;
+      
+      if (!this.twilioClient) {
+        throw new Error('SMS service not configured');
+      }
+
+      await this.twilioClient.messages.create({
+        body: this.replaceVariables(smsBody, context.variables),
+        from: process.env.TWILIO_PHONE_NUMBER,
+        to: this.replaceVariables(smsTo, context.variables)
+      });
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error executing SMS node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute AI node
+  async executeAiNode(node, context) {
+    try {
+      const { aiModel, prompt, maxTokens, temperature } = node.data;
+      
+      if (!this.openaiClient) {
+        throw new Error('AI service not configured');
+      }
+
+      const completion = await this.openaiClient.chat.completions.create({
+        model: aiModel || 'gpt-3.5-turbo',
+        messages: [
+          {
+            role: 'user',
+            content: this.replaceVariables(prompt, context.variables)
+          }
+        ],
+        max_tokens: maxTokens || 150,
+        temperature: temperature || 0.7
+      });
+
+      const aiResponse = completion.choices[0].message.content;
+
+      return {
+        success: true,
+        message: aiResponse,
+        context: {
+          ...context,
+          aiResponse
+        }
+      };
+    } catch (error) {
+      console.error('Error executing AI node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute transfer node
+  async executeTransferNode(node, context, whatsappService, botId, userId) {
+    try {
+      const { transferTo, transferType, transferMessage } = node.data;
+      
+      // Mark conversation for transfer
+      await Conversation.findOneAndUpdate(
+        { botId, userId },
+        {
+          status: 'transferred',
+          transferredTo: transferTo,
+          transferType,
+          transferredAt: new Date()
+        }
+      );
+
+      // Send transfer message
+      await whatsappService.sendMessage(
+        botId,
+        userId,
+        transferMessage || 'Transfiriendo su conversación a un agente...'
+      );
+
+      // Emit transfer event
+      global.io?.emit('conversation-transferred', {
+        botId,
+        userId,
+        transferTo,
+        transferType
+      });
+
+      return {
+        success: true,
+        endConversation: true
+      };
+    } catch (error) {
+      console.error('Error executing transfer node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Helper function to replace variables
+  replaceVariables(text, variables) {
+    if (!text) return '';
+    
+    let result = text;
+    Object.keys(variables).forEach(key => {
+      const regex = new RegExp(`{{${key}}}`, 'g');
+      result = result.replace(regex, variables[key]);
+    });
+    
+    return result;
+  }
+}
+
+module.exports = new NodeExecutors();
+```
+
+## 3️⃣ SISTEMA DE TEMPLATES DE FLUJOS
+
+### 📦 backend/models/FlowTemplate.js
+
+```javascript
+const mongoose = require('mongoose');
+
+const flowTemplateSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  description: {
+    type: String,
+    required: true
+  },
+  category: {
+    type: String,
+    enum: ['customer-service', 'sales', 'support', 'marketing', 'booking', 'survey', 'custom'],
+    default: 'custom'
+  },
+  icon: String,
+  thumbnail: String,
+  tags: [String],
+  difficulty: {
+    type: String,
+    enum: ['beginner', 'intermediate', 'advanced'],
+    default: 'beginner'
+  },
+  estimatedTime: Number, // in minutes
+  language: {
+    type: String,
+    default: 'es'
+  },
+  nodes: [{
+    id: String,
+    type: String,
+    position: {
+      x: Number,
+      y: Number
+    },
+    data: mongoose.Schema.Types.Mixed
+  }],
+  edges: [{
+    id: String,
+    source: String,
+    target: String,
+    sourceHandle: String,
+    targetHandle: String,
+    label: String,
+    condition: String
+  }],
+  variables: [{
+    name: String,
+    type: String,
+    defaultValue: mongoose.Schema.Types.Mixed,
+    description: String
+  }],
+  requirements: [String],
+  features: [String],
+  isPublic: {
+    type: Boolean,
+    default: true
+  },
+  isPremium: {
+    type: Boolean,
+    default: false
+  },
+  creator: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  stats: {
+    uses: {
+      type: Number,
+      default: 0
+    },
+    rating: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 5
+    },
+    reviews: [{
+      user: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+      },
+      rating: Number,
+      comment: String,
+      date: Date
+    }]
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+// Indexes
+flowTemplateSchema.index({ category: 1, isPublic: 1 });
+flowTemplateSchema.index({ tags: 1 });
+flowTemplateSchema.index({ 'stats.uses': -1 });
+flowTemplateSchema.index({ 'stats.rating': -1 });
+
+module.exports = mongoose.model('FlowTemplate', flowTemplateSchema);
+```
+
+### 📦 backend/services/templateService.js
+
+```javascript
+const FlowTemplate = require('../models/FlowTemplate');
+const Flow = require('../models/Flow');
+
+class TemplateService {
+  // Get default templates
+  async getDefaultTemplates() {
+    return [
+      {
+        name: 'Atención al Cliente Básica',
+        category: 'customer-service',
+        description: 'Template básico para atención al cliente con menú principal y opciones comunes',
+        difficulty: 'beginner',
+        nodes: [
+          {
+            id: 'welcome',
+            type: 'message',
+            position: { x: 250, y: 50 },
+            data: {
+              content: '¡Hola! 👋 Bienvenido a nuestro servicio de atención al cliente.\n\n¿En qué puedo ayudarte hoy?'
+            }
+          },
+          {
+            id: 'menu',
+            type: 'button',
+            position: { x: 250, y: 150 },
+            data: {
+              content: 'Por favor, selecciona una opción:',
+              options: [
+                { id: '1', label: '📦 Estado de pedido' },
+                { id: '2', label: '❓ Preguntas frecuentes' },
+                { id: '3', label: '💬 Hablar con agente' },
+                { id: '4', label: '📝 Dejar comentario' }
+              ]
+            }
+          }
+        ],
+        edges: [
+          { id: 'e1', source: 'welcome', target: 'menu' }
+        ]
+      },
+      {
+        name: 'Reserva de Citas',
+        category: 'booking',
+        description: 'Sistema completo para reserva de citas con calendario y confirmación',
+        difficulty: 'intermediate',
+        nodes: [
+          {
+            id: 'start',
+            type: 'message',
+            position: { x: 250, y: 50 },
+            data: {
+              content: '¡Hola! 📅 Vamos a agendar tu cita.\n\nPrimero, necesito algunos datos.'
+            }
+          },
+          {
+            id: 'getName',
+            type: 'question',
+            position: { x: 250, y: 150 },
+            data: {
+              content: '¿Cuál es tu nombre completo?'
+            }
+          },
+          {
+            id: 'getService',
+            type: 'list',
+            position: { x: 250, y: 250 },
+            data: {
+              content: '¿Qué servicio necesitas?',
+              options: [
+                { label: 'Consulta General' },
+                { label: 'Consulta Especializada' },
+                { label: 'Exámenes' },
+                { label: 'Seguimiento' }
+              ]
+            }
+          }
+        ],
+        edges: [
+          { id: 'e1', source: 'start', target: 'getName' },
+          { id: 'e2', source: 'getName', target: 'getService' }
+        ]
+      },
+      {
+        name: 'Encuesta de Satisfacción',
+        category: 'survey',
+        description: 'Template para realizar encuestas de satisfacción post-servicio',
+        difficulty: 'beginner',
+        nodes: [
+          {
+            id: 'intro',
+            type: 'message',
+            position: { x: 250, y: 50 },
+            data: {
+              content: '¡Gracias por usar nuestro servicio! 🙏\n\nNos gustaría conocer tu opinión para mejorar.'
+            }
+          },
+          {
+            id: 'rating',
+            type: 'button',
+            position: { x: 250, y: 150 },
+            data: {
+              content: '¿Cómo calificarías tu experiencia?',
+              options: [
+                { id: '5', label: '⭐⭐⭐⭐⭐ Excelente' },
+                { id: '4', label: '⭐⭐⭐⭐ Buena' },
+                { id: '3', label: '⭐⭐⭐ Regular' },
+                { id: '2', label: '⭐⭐ Mala' },
+                { id: '1', label: '⭐ Muy mala' }
+              ]
+            }
+          }
+        ],
+        edges: [
+          { id: 'e1', source: 'intro', target: 'rating' }
+        ]
+      },
+      {
+        name: 'Catálogo de Productos',
+        category: 'sales',
+        description: 'Muestra catálogo de productos con imágenes y precios',
+        difficulty: 'intermediate',
+        nodes: [
+          {
+            id: 'welcome',
+            type: 'message',
+            position: { x: 250, y: 50 },
+            data: {
+              content: '¡Bienvenido a nuestra tienda! 🛍️\n\n¿Qué tipo de productos te interesan?'
+            }
+          },
+          {
+            id: 'categories',
+            type: 'carousel',
+            position: { x: 250, y: 150 },
+            data: {
+              cards: [
+                {
+                  title: 'Electrónicos',
+                  description: 'Laptops, celulares y más',
+                  imageUrl: 'https://example.com/electronics.jpg',
+                  buttons: [
+                    { text: 'Ver productos', action: 'show_electronics' }
+                  ]
+                },
+                {
+                  title: 'Ropa',
+                  description: 'Moda para toda la familia',
+                  imageUrl: 'https://example.com/clothing.jpg',
+                  buttons: [
+                    { text: 'Ver catálogo', action: 'show_clothing' }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        edges: [
+          { id: 'e1', source: 'welcome', target: 'categories' }
+        ]
+      },
+      {
+        name: 'Soporte Técnico con IA',
+        category: 'support',
+        description: 'Soporte técnico inteligente usando IA para resolver problemas',
+        difficulty: 'advanced',
+        nodes: [
+          {
+            id: 'start',
+            type: 'message',
+            position: { x: 250, y: 50 },
+            data: {
+              content: '🔧 Hola, soy tu asistente de soporte técnico.\n\nDescribe tu problema y te ayudaré a resolverlo.'
+            }
+          },
+          {
+            id: 'getProblem',
+            type: 'question',
+            position: { x: 250, y: 150 },
+            data: {
+              content: '¿Cuál es el problema que estás experimentando?'
+            }
+          },
+          {
+            id: 'analyzeWithAI',
+            type: 'ai',
+            position: { x: 250, y: 250 },
+            data: {
+              prompt: 'Analiza el siguiente problema técnico y proporciona una solución paso a paso: {{userProblem}}',
+              aiModel: 'gpt-3.5-turbo',
+              maxTokens: 200
+            }
+          }
+        ],
+        edges: [
+          { id: 'e1', source: 'start', target: 'getProblem' },
+          { id: 'e2', source: 'getProblem', target: 'analyzeWithAI' }
+        ]
+      }
+    ];
+  }
+
+  // Create flow from template
+  async createFlowFromTemplate(templateId, userId, customizations = {}) {
+    try {
+      const template = await FlowTemplate.findById(templateId);
+      
+      if (!template) {
+        throw new Error('Template not found');
+      }
+
+      // Create new flow based on template
+      const flow = new Flow({
+        user: userId,
+        name: customizations.name || `${template.name} - Copy`,
+        description: customizations.description || template.description,
+        trigger: customizations.trigger || 'keyword',
+        keywords: customizations.keywords || [],
+        nodes: template.nodes,
+        edges: template.edges,
+        variables: template.variables,
+        isActive: false
+      });
+
+      await flow.save();
+
+      // Update template usage stats
+      template.stats.uses += 1;
+      await template.save();
+
+      return flow;
+    } catch (error) {
+      console.error('Error creating flow from template:', error);
+      throw error;
+    }
+  }
+
+  // Get template recommendations
+  async getRecommendations(userId, category = null) {
+    try {
+      const query = { isPublic: true };
+      
+      if (category) {
+        query.category = category;
+      }
+
+      const templates = await FlowTemplate.find(query)
+        .sort('-stats.rating -stats.uses')
+        .limit(10)
+        .select('name description category icon thumbnail tags difficulty stats.rating stats.uses');
+
+      return templates;
+    } catch (error) {
+      console.error('Error getting template recommendations:', error);
+      throw error;
+    }
+  }
+}
+
+module.exports = new TemplateService();
+```
+
+## 4️⃣ EXPORTACIÓN/IMPORTACIÓN DE FLUJOS
+
+### 📦 backend/services/flowExportService.js
+
+```javascript
+const Flow = require('../models/Flow');
+const Bot = require('../models/Bot');
+const JSZip = require('jszip');
+const fs = require('fs').promises;
+const path = require('path');
+
+class FlowExportService {
+  // Export flow as JSON
+  async exportFlowAsJSON(flowId, userId) {
+    try {
+      const flow = await Flow.findOne({ _id: flowId, user: userId });
+      
+      if (!flow) {
+        throw new Error('Flow not found');
+      }
+
+      const exportData = {
+        version: '1.0.0',
+        exportDate: new Date().toISOString(),
+        flow: {
+          name: flow.name,
+          description: flow.description,
+          trigger: flow.trigger,
+          keywords: flow.keywords,
+          pattern: flow.pattern,
+          nodes: flow.nodes,
+          edges: flow.edges,
+          variables: flow.variables,
+          priority: flow.priority
+        }
+      };
+
+      return {
+        data: JSON.stringify(exportData, null, 2),
+        filename: `${flow.name.replace(/[^a-z0-9]/gi, '_')}.json`,
+        mimeType: 'application/json'
+      };
+    } catch (error) {
+      console.error('Error exporting flow:', error);
+      throw error;
+    }
+  }
+
+  // Import flow from JSON
+  async importFlowFromJSON(jsonData, userId) {
+    try {
+      const importData = JSON.parse(jsonData);
+      
+      // Validate import data
+      if (!importData.flow || !importData.version) {
+        throw new Error('Invalid flow format');
+      }
+
+      // Create new flow
+      const flow = new Flow({
+        user: userId,
+        name: `${importData.flow.name} (Imported)`,
+        description: importData.flow.description,
+        trigger: importData.flow.trigger,
+        keywords: importData.flow.keywords,
+        pattern: importData.flow.pattern,
+        nodes: importData.flow.nodes,
+        edges: importData.flow.edges,
+        variables: importData.flow.variables,
+        priority: importData.flow.priority || 0,
+        isActive: false
+      });
+
+      await flow.save();
+
+      return flow;
+    } catch (error) {
+      console.error('Error importing flow:', error);
+      throw error;
+    }
+  }
+
+  // Export multiple flows as ZIP
+  async exportFlowsAsZip(flowIds, userId) {
+    try {
+      const zip = new JSZip();
+      const flows = await Flow.find({ 
+        _id: { $in: flowIds }, 
+        user: userId 
+      });
+
+      for (const flow of flows) {
+        const exportData = {
+          version: '1.0.0',
+          exportDate: new Date().toISOString(),
+          flow: {
+            name: flow.name,
+            description: flow.description,
+            trigger: flow.trigger,
+            keywords: flow.keywords,
+            pattern: flow.pattern,
+            nodes: flow.nodes,
+            edges: flow.edges,
+            variables: flow.variables,
+            priority: flow.priority
+          }
+        };
+
+        const filename = `${flow.name.replace(/[^a-z0-9]/gi, '_')}.json`;
+        zip.file(filename, JSON.stringify(exportData, null, 2));
+      }
+
+      // Add metadata file
+      const metadata = {
+        exportDate: new Date().toISOString(),
+        flowCount: flows.length,
+        flows: flows.map(f => ({ id: f._id, name: f.name }))
+      };
+      
+      zip.file('metadata.json', JSON.stringify(metadata, null, 2));
+
+      const content = await zip.generateAsync({ type: 'nodebuffer' });
+
+      return {
+        data: content,
+        filename: `flows_export_${Date.now()}.zip`,
+        mimeType: 'application/zip'
+      };
+    } catch (error) {
+      console.error('Error exporting flows as ZIP:', error);
+      throw error;
+    }
+  }
+
+  // Export bot configuration with all flows
+  async exportBotConfiguration(botId, userId) {
+    try {
+      const bot = await Bot.findOne({ _id: botId, user: userId })
+        .populate('flows')
+        .populate('defaultFlow');
+
+      if (!bot) {
+        throw new Error('Bot not found');
+      }
+
+      const exportData = {
+        version: '1.0.0',
+        exportDate: new Date().toISOString(),
+        bot: {
+          name: bot.name,
+          description: bot.description,
+          settings: bot.settings,
+          defaultFlow: bot.defaultFlow ? bot.defaultFlow.name : null
+        },
+        flows: bot.flows.map(flow => ({
+          name: flow.name,
+          description: flow.description,
+          trigger: flow.trigger,
+          keywords: flow.keywords,
+          pattern: flow.pattern,
+          nodes: flow.nodes,
+          edges: flow.edges,
+          variables: flow.variables,
+          priority: flow.priority
+        }))
+      };
+
+      return {
+        data: JSON.stringify(exportData, null, 2),
+        filename: `${bot.name.replace(/[^a-z0-9]/gi, '_')}_config.json`,
+        mimeType: 'application/json'
+      };
+    } catch (error) {
+      console.error('Error exporting bot configuration:', error);
+      throw error;
+    }
+  }
+
+  // Import bot configuration
+  async importBotConfiguration(configData, userId) {
+    try {
+      const importData = JSON.parse(configData);
+      
+      // Create bot
+      const bot = new Bot({
+        user: userId,
+        name: `${importData.bot.name} (Imported)`,
+        description: importData.bot.description,
+        settings: importData.bot.settings
+      });
+
+      await bot.save();
+
+      // Create flows
+      const flowIds = [];
+      let defaultFlowId = null;
+
+      for (const flowData of importData.flows) {
+        const flow = new Flow({
+          user: userId,
+          name: flowData.name,
+          description: flowData.description,
+          trigger: flowData.trigger,
+          keywords: flowData.keywords,
+          pattern: flowData.pattern,
+          nodes: flowData.nodes,
+          edges: flowData.edges,
+          variables: flowData.variables,
+          priority: flowData.priority || 0,
+          isActive: false
+        });
+
+        await flow.save();
+        flowIds.push(flow._id);
+
+        if (flowData.name === importData.bot.defaultFlow) {
+          defaultFlowId = flow._id;
+        }
+      }
+
+      // Update bot with flows
+      bot.flows = flowIds;
+      bot.defaultFlow = defaultFlowId;
+      await bot.save();
+
+      return bot;
+    } catch (error) {
+      console.error('Error importing bot configuration:', error);
+      throw error;
+    }
+  }
+}
+
+module.exports = new FlowExportService();
+```
+
+## 5️⃣ WEBHOOKS PARA INTEGRACIONES EXTERNAS
+
+### 📦 backend/models/Webhook.js
+
+```javascript
+const mongoose = require('mongoose');
+const crypto = require('crypto');
+
+const webhookSchema = new mongoose.Schema({
+  user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  bot: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Bot'
+  },
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  description: String,
+  url: {
+    type: String,
+    required: true,
+    validate: {
+      validator: function(v) {
+        return /^https?:\/\/.+/.test(v);
+      },
+      message: 'Invalid URL format'
+    }
+  },
+  secret: {
+    type: String,
+    default: () => crypto.randomBytes(32).toString('hex')
+  },
+  events: [{
+    type: String,
+    enum: [
+      'message.received',
+      'message.sent',
+      'message.failed',
+      'conversation.started',
+      'conversation.ended',
+      'flow.started',
+      'flow.completed',
+      'flow.failed',
+      'bot.connected',
+      'bot.disconnected',
+      'user.joined',
+      'user.left',
+      'error.occurred'
+    ]
+  }],
+  headers: mongoose.Schema.Types.Mixed,
+  retryPolicy: {
+    maxAttempts: {
+      type: Number,
+      default: 3
+    },
+    retryDelay: {
+      type: Number,
+      default: 1000
+    },
+    backoffMultiplier: {
+      type: Number,
+      default: 2
+    }
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
+  stats: {
+    totalCalls: {
+      type: Number,
+      default: 0
+    },
+    successfulCalls: {
+      type: Number,
+      default: 0
+    },
+    failedCalls: {
+      type: Number,
+      default: 0
+    },
+    lastCall: Date,
+    lastSuccess: Date,
+    lastError: {
+      message: String,
+      timestamp: Date
+    },
+    avgResponseTime: Number
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+// Indexes
+webhookSchema.index({ user: 1, isActive: 1 });
+webhookSchema.index({ bot: 1, events: 1 });
+
+module.exports = mongoose.model('Webhook', webhookSchema);
+```
+
+### 📦 backend/services/webhookService.js
+
+```javascript
+const Webhook = require('../models/Webhook');
+const axios = require('axios');
+const crypto = require('crypto');
+const Queue = require('bull');
+
+class WebhookService {
+  constructor() {
+    // Initialize webhook queue for async processing
+    this.webhookQueue = new Queue('webhooks', {
+      redis: {
+        host: process.env.REDIS_HOST,
+        port: process.env.REDIS_PORT,
+        password: process.env.REDIS_PASSWORD
+      }
+    });
+
+    this.setupQueueProcessor();
+  }
+
+  setupQueueProcessor() {
+    this.webhookQueue.process(async (job) => {
+      const { webhookId, event, payload } = job.data;
+      return await this.executeWebhook(webhookId, event, payload);
+    });
+  }
+
+  // Trigger webhook for an event
+  async triggerWebhook(event, payload, botId = null) {
+    try {
+      // Find all active webhooks for this event
+      const query = {
+        events: event,
+        isActive: true
+      };
+
+      if (botId) {
+        query.bot = botId;
+      }
+
+      const webhooks = await Webhook.find(query);
+
+      // Queue webhook calls
+      for (const webhook of webhooks) {
+        await this.webhookQueue.add({
+          webhookId: webhook._id,
+          event,
+          payload
+        }, {
+          attempts: webhook.retryPolicy.maxAttempts,
+          backoff: {
+            type: 'exponential',
+            delay: webhook.retryPolicy.retryDelay
+          }
+        });
+      }
+
+      return webhooks.length;
+    } catch (error) {
+      console.error('Error triggering webhooks:', error);
+      throw error;
+    }
+  }
+
+  // Execute a single webhook
+  async executeWebhook(webhookId, event, payload) {
+    const webhook = await Webhook.findById(webhookId);
+    
+    if (!webhook || !webhook.isActive) {
+      return { success: false, reason: 'Webhook not found or inactive' };
+    }
+
+    const startTime = Date.now();
+
+    try {
+      // Prepare payload
+      const webhookPayload = {
+        event,
+        timestamp: new Date().toISOString(),
+        data: payload
+      };
+
+      // Generate signature
+      const signature = this.generateSignature(webhookPayload, webhook.secret);
+
+      // Prepare headers
+      const headers = {
+        'Content-Type': 'application/json',
+        'X-Webhook-Event': event,
+        'X-Webhook-Signature': signature,
+        'X-Webhook-Timestamp': webhookPayload.timestamp,
+        ...webhook.headers
+      };
+
+      // Make HTTP request
+      const response = await axios({
+        url: webhook.url,
+        method: 'POST',
+        headers,
+        data: webhookPayload,
+        timeout: 10000,
+        validateStatus: (status) => status < 500
+      });
+
+      // Update stats
+      const responseTime = Date.now() - startTime;
+      
+      webhook.stats.totalCalls++;
+      webhook.stats.successfulCalls++;
+      webhook.stats.lastCall = new Date();
+      webhook.stats.lastSuccess = new Date();
+      webhook.stats.avgResponseTime = 
+        (webhook.stats.avgResponseTime * (webhook.stats.totalCalls - 1) + responseTime) / 
+        webhook.stats.totalCalls;
+
+      await webhook.save();
+
+      return {
+        success: true,
+        statusCode: response.status,
+        responseTime
+      };
+    } catch (error) {
+      // Update error stats
+      webhook.stats.totalCalls++;
+      webhook.stats.failedCalls++;
+      webhook.stats.lastCall = new Date();
+      webhook.stats.lastError = {
+        message: error.message,
+        timestamp: new Date()
+      };
+
+      await webhook.save();
+
+      throw error;
+    }
+  }
+
+  // Generate signature for webhook payload
+  generateSignature(payload, secret) {
+    const hmac = crypto.createHmac('sha256', secret);
+    hmac.update(JSON.stringify(payload));
+    return hmac.digest('hex');
+  }
+
+  // Verify incoming webhook
+  verifyWebhookSignature(payload, signature, secret) {
+    const expectedSignature = this.generateSignature(payload, secret);
+    return crypto.timingSafeEqual(
+      Buffer.from(signature),
+      Buffer.from(expectedSignature)
+    );
+  }
+
+  // Create webhook endpoint for receiving external webhooks
+  async handleIncomingWebhook(webhookId, payload, signature) {
+    try {
+      const webhook = await Webhook.findById(webhookId);
+      
+      if (!webhook) {
+        throw new Error('Webhook not found');
+      }
+
+      // Verify signature if provided
+      if (signature && !this.verifyWebhookSignature(payload, signature, webhook.secret)) {
+        throw new Error('Invalid signature');
+      }
+
+      // Process the incoming webhook based on configuration
+      // This could trigger flows, update data, etc.
+      
+      return { success: true, message: 'Webhook processed' };
+    } catch (error) {
+      console.error('Error handling incoming webhook:', error);
+      throw error;
+    }
+  }
+}
+
+module.exports = new WebhookService();
+```
+
+## 6️⃣ PANEL DE CONVERSACIONES EN TIEMPO REAL
+
+### 📦 backend/services/realtimeService.js
+
+```javascript
+const Conversation = require('../models/Conversation');
+const Bot = require('../models/Bot');
+const User = require('../models/User');
+
+class RealtimeService {
+  constructor(io) {
+    this.io = io;
+    this.activeConnections = new Map();
+    this.setupSocketHandlers();
+  }
+
+  setupSocketHandlers() {
+    this.io.on('connection', (socket) => {
+      console.log('New realtime connection:', socket.id);
+
+      // Agent/Admin joins monitoring room
+      socket.on('join-monitoring', async (data) => {
+        const { userId, botId } = data;
+        
+        // Verify user has access to bot
+        const bot = await Bot.fin# 🚀 FUNCIONALIDADES AVANZADAS - BOTBUILDER PLATFORM
+
+## 1️⃣ ANÁLISIS Y MÉTRICAS DETALLADAS
+
+### 📦 backend/models/Analytics.js
+
+```javascript
+const mongoose = require('mongoose');
+
+const analyticsSchema = new mongoose.Schema({
+  botId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Bot',
+    required: true
+  },
+  date: {
+    type: Date,
+    required: true,
+    index: true
+  },
+  metrics: {
+    totalMessages: {
+      type: Number,
+      default: 0
+    },
+    uniqueUsers: {
+      type: Number,
+      default: 0
+    },
+    activeConversations: {
+      type: Number,
+      default: 0
+    },
+    completedFlows: {
+      type: Number,
+      default: 0
+    },
+    abandonedFlows: {
+      type: Number,
+      default: 0
+    },
+    avgResponseTime: {
+      type: Number,
+      default: 0
+    },
+    avgSessionDuration: {
+      type: Number,
+      default: 0
+    },
+    messagesByHour: [{
+      hour: Number,
+      count: Number
+    }],
+    popularKeywords: [{
+      keyword: String,
+      count: Number
+    }],
+    flowPerformance: [{
+      flowId: mongoose.Schema.Types.ObjectId,
+      flowName: String,
+      executions: Number,
+      completions: Number,
+      avgDuration: Number,
+      successRate: Number
+    }],
+    userSatisfaction: {
+      positive: Number,
+      neutral: Number,
+      negative: Number
+    }
+  },
+  userMetrics: [{
+    userId: String,
+    messageCount: Number,
+    sessionCount: Number,
+    totalDuration: Number,
+    lastActive: Date
+  }],
+  errorLogs: [{
+    timestamp: Date,
+    type: String,
+    message: String,
+    flowId: mongoose.Schema.Types.ObjectId,
+    userId: String
+  }],
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+// Indexes for efficient queries
+analyticsSchema.index({ botId: 1, date: -1 });
+analyticsSchema.index({ 'metrics.totalMessages': -1 });
+
+module.exports = mongoose.model('Analytics', analyticsSchema);
+```
+
+### 📦 backend/models/Conversation.js
+
+```javascript
+const mongoose = require('mongoose');
+
+const messageSchema = new mongoose.Schema({
+  sender: {
+    type: String,
+    enum: ['user', 'bot'],
+    required: true
+  },
+  content: String,
+  type: {
+    type: String,
+    enum: ['text', 'image', 'audio', 'video', 'document', 'location', 'button_response'],
+    default: 'text'
+  },
+  metadata: mongoose.Schema.Types.Mixed,
+  timestamp: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+const conversationSchema = new mongoose.Schema({
+  botId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Bot',
+    required: true
+  },
+  userId: {
+    type: String,
+    required: true
+  },
+  phoneNumber: String,
+  userName: String,
+  status: {
+    type: String,
+    enum: ['active', 'completed', 'abandoned', 'paused'],
+    default: 'active'
+  },
+  messages: [messageSchema],
+  currentFlow: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Flow'
+  },
+  currentNode: String,
+  context: {
+    variables: mongoose.Schema.Types.Mixed,
+    sessionData: mongoose.Schema.Types.Mixed
+  },
+  metrics: {
+    messageCount: {
+      type: Number,
+      default: 0
+    },
+    duration: Number,
+    satisfaction: {
+      type: String,
+      enum: ['positive', 'neutral', 'negative', 'unknown'],
+      default: 'unknown'
+    }
+  },
+  tags: [String],
+  notes: String,
+  startedAt: {
+    type: Date,
+    default: Date.now
+  },
+  endedAt: Date,
+  lastActivity: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+// Indexes
+conversationSchema.index({ botId: 1, userId: 1 });
+conversationSchema.index({ botId: 1, status: 1 });
+conversationSchema.index({ phoneNumber: 1 });
+conversationSchema.index({ lastActivity: -1 });
+
+// Virtual for duration calculation
+conversationSchema.virtual('duration').get(function() {
+  if (this.endedAt) {
+    return this.endedAt - this.startedAt;
+  }
+  return Date.now() - this.startedAt;
+});
+
+module.exports = mongoose.model('Conversation', conversationSchema);
+```
+
+### 📦 backend/services/analyticsService.js
+
+```javascript
+const Analytics = require('../models/Analytics');
+const Conversation = require('../models/Conversation');
+const Bot = require('../models/Bot');
+const moment = require('moment');
+
+class AnalyticsService {
+  // Track message event
+  async trackMessage(botId, userId, message, response) {
+    try {
+      const today = moment().startOf('day').toDate();
+      
+      // Update or create analytics for today
+      const analytics = await Analytics.findOneAndUpdate(
+        { botId, date: today },
+        {
+          $inc: { 'metrics.totalMessages': 1 },
+          $addToSet: { 'userMetrics.userId': userId }
+        },
+        { upsert: true, new: true }
+      );
+
+      // Update hourly metrics
+      const hour = moment().hour();
+      const hourIndex = analytics.metrics.messagesByHour.findIndex(h => h.hour === hour);
+      
+      if (hourIndex > -1) {
+        analytics.metrics.messagesByHour[hourIndex].count++;
+      } else {
+        analytics.metrics.messagesByHour.push({ hour, count: 1 });
+      }
+
+      await analytics.save();
+
+      // Update conversation
+      await this.updateConversation(botId, userId, message, response);
+
+    } catch (error) {
+      console.error('Error tracking message:', error);
+    }
+  }
+
+  // Update conversation data
+  async updateConversation(botId, userId, userMessage, botResponse) {
+    try {
+      let conversation = await Conversation.findOne({
+        botId,
+        userId,
+        status: 'active'
+      });
+
+      if (!conversation) {
+        conversation = new Conversation({
+          botId,
+          userId,
+          phoneNumber: userId.replace('@s.whatsapp.net', '')
+        });
+      }
+
+      // Add messages
+      conversation.messages.push({
+        sender: 'user',
+        content: userMessage,
+        type: 'text'
+      });
+
+      if (botResponse) {
+        conversation.messages.push({
+          sender: 'bot',
+          content: botResponse,
+          type: 'text'
+        });
+      }
+
+      conversation.metrics.messageCount = conversation.messages.length;
+      conversation.lastActivity = new Date();
+
+      await conversation.save();
+
+      return conversation;
+    } catch (error) {
+      console.error('Error updating conversation:', error);
+    }
+  }
+
+  // Get dashboard metrics
+  async getDashboardMetrics(userId, dateRange = 'week') {
+    try {
+      const user = await User.findById(userId);
+      const bots = await Bot.find({ user: userId });
+      const botIds = bots.map(b => b._id);
+
+      let startDate;
+      switch (dateRange) {
+        case 'day':
+          startDate = moment().startOf('day');
+          break;
+        case 'week':
+          startDate = moment().startOf('week');
+          break;
+        case 'month':
+          startDate = moment().startOf('month');
+          break;
+        default:
+          startDate = moment().subtract(7, 'days');
+      }
+
+      const analytics = await Analytics.find({
+        botId: { $in: botIds },
+        date: { $gte: startDate.toDate() }
+      });
+
+      // Aggregate metrics
+      const metrics = {
+        totalMessages: 0,
+        uniqueUsers: new Set(),
+        activeConversations: 0,
+        completedFlows: 0,
+        avgResponseTime: 0,
+        messagesByDay: [],
+        messagesByHour: Array(24).fill(0),
+        topKeywords: {},
+        flowPerformance: {},
+        satisfaction: { positive: 0, neutral: 0, negative: 0 }
+      };
+
+      analytics.forEach(day => {
+        metrics.totalMessages += day.metrics.totalMessages;
+        metrics.completedFlows += day.metrics.completedFlows;
+        
+        day.userMetrics.forEach(user => {
+          metrics.uniqueUsers.add(user.userId);
+        });
+
+        day.metrics.messagesByHour.forEach(hourData => {
+          metrics.messagesByHour[hourData.hour] += hourData.count;
+        });
+
+        day.metrics.popularKeywords.forEach(keyword => {
+          metrics.topKeywords[keyword.keyword] = 
+            (metrics.topKeywords[keyword.keyword] || 0) + keyword.count;
+        });
+      });
+
+      metrics.uniqueUsers = metrics.uniqueUsers.size;
+
+      // Get recent conversations
+      const recentConversations = await Conversation.find({
+        botId: { $in: botIds }
+      })
+      .sort('-lastActivity')
+      .limit(10)
+      .select('userId phoneNumber status lastActivity metrics.messageCount');
+
+      return {
+        metrics,
+        recentConversations,
+        dateRange
+      };
+    } catch (error) {
+      console.error('Error getting dashboard metrics:', error);
+      throw error;
+    }
+  }
+
+  // Generate detailed report
+  async generateReport(botId, startDate, endDate) {
+    try {
+      const analytics = await Analytics.find({
+        botId,
+        date: {
+          $gte: moment(startDate).startOf('day').toDate(),
+          $lte: moment(endDate).endOf('day').toDate()
+        }
+      });
+
+      const conversations = await Conversation.find({
+        botId,
+        startedAt: {
+          $gte: moment(startDate).startOf('day').toDate(),
+          $lte: moment(endDate).endOf('day').toDate()
+        }
+      });
+
+      // Calculate comprehensive metrics
+      const report = {
+        period: {
+          start: startDate,
+          end: endDate
+        },
+        summary: {
+          totalMessages: 0,
+          totalConversations: conversations.length,
+          uniqueUsers: new Set(),
+          avgMessagesPerConversation: 0,
+          avgSessionDuration: 0,
+          completionRate: 0
+        },
+        performance: {
+          peakHours: [],
+          busiestDays: [],
+          responseTime: {
+            avg: 0,
+            min: Infinity,
+            max: 0
+          }
+        },
+        userEngagement: {
+          returningUsers: 0,
+          newUsers: 0,
+          avgMessagesPerUser: 0,
+          userRetention: 0
+        },
+        flowAnalysis: {},
+        satisfaction: {
+          positive: 0,
+          neutral: 0,
+          negative: 0,
+          score: 0
+        },
+        topKeywords: [],
+        errors: []
+      };
+
+      // Process analytics data
+      analytics.forEach(day => {
+        report.summary.totalMessages += day.metrics.totalMessages;
+        
+        day.userMetrics.forEach(user => {
+          report.summary.uniqueUsers.add(user.userId);
+        });
+
+        // Aggregate flow performance
+        day.metrics.flowPerformance.forEach(flow => {
+          if (!report.flowAnalysis[flow.flowId]) {
+            report.flowAnalysis[flow.flowId] = {
+              name: flow.flowName,
+              executions: 0,
+              completions: 0,
+              avgDuration: 0,
+              successRate: 0
+            };
+          }
+          
+          const fa = report.flowAnalysis[flow.flowId];
+          fa.executions += flow.executions;
+          fa.completions += flow.completions;
+        });
+
+        // Aggregate satisfaction
+        report.satisfaction.positive += day.metrics.userSatisfaction.positive;
+        report.satisfaction.neutral += day.metrics.userSatisfaction.neutral;
+        report.satisfaction.negative += day.metrics.userSatisfaction.negative;
+      });
+
+      report.summary.uniqueUsers = report.summary.uniqueUsers.size;
+      report.summary.avgMessagesPerConversation = 
+        report.summary.totalMessages / (conversations.length || 1);
+
+      // Calculate satisfaction score
+      const totalSatisfaction = 
+        report.satisfaction.positive + 
+        report.satisfaction.neutral + 
+        report.satisfaction.negative;
+      
+      if (totalSatisfaction > 0) {
+        report.satisfaction.score = 
+          (report.satisfaction.positive / totalSatisfaction) * 100;
+      }
+
+      return report;
+    } catch (error) {
+      console.error('Error generating report:', error);
+      throw error;
+    }
+  }
+
+  // Real-time metrics stream
+  async getRealtimeMetrics(botId) {
+    try {
+      const now = new Date();
+      const fiveMinutesAgo = new Date(now - 5 * 60 * 1000);
+
+      const recentConversations = await Conversation.find({
+        botId,
+        lastActivity: { $gte: fiveMinutesAgo }
+      }).select('userId status lastActivity metrics');
+
+      const activeUsers = recentConversations.filter(c => c.status === 'active').length;
+      
+      const messagesLastHour = await Conversation.aggregate([
+        {
+          $match: {
+            botId: mongoose.Types.ObjectId(botId),
+            'messages.timestamp': { $gte: new Date(now - 60 * 60 * 1000) }
+          }
+        },
+        {
+          $unwind: '$messages'
+        },
+        {
+          $match: {
+            'messages.timestamp': { $gte: new Date(now - 60 * 60 * 1000) }
+          }
+        },
+        {
+          $count: 'total'
+        }
+      ]);
+
+      return {
+        activeUsers,
+        messagesLastHour: messagesLastHour[0]?.total || 0,
+        recentActivity: recentConversations.map(c => ({
+          userId: c.userId,
+          status: c.status,
+          lastActivity: c.lastActivity,
+          messageCount: c.metrics.messageCount
+        }))
+      };
+    } catch (error) {
+      console.error('Error getting realtime metrics:', error);
+      throw error;
+    }
+  }
+}
+
+module.exports = new AnalyticsService();
+```
+
+### 📦 backend/controllers/analyticsController.js
+
+```javascript
+const analyticsService = require('../services/analyticsService');
+const Conversation = require('../models/Conversation');
+const Bot = require('../models/Bot');
+
+// Get dashboard metrics
+exports.getDashboardMetrics = async (req, res) => {
+  try {
+    const { dateRange = 'week' } = req.query;
+    const metrics = await analyticsService.getDashboardMetrics(req.userId, dateRange);
+    
+    res.json({
+      success: true,
+      metrics
+    });
+  } catch (error) {
+    console.error('Error fetching dashboard metrics:', error);
+    res.status(500).json({
+      error: 'Error fetching metrics'
+    });
+  }
+};
+
+// Get bot-specific analytics
+exports.getBotAnalytics = async (req, res) => {
+  try {
+    const { botId } = req.params;
+    const { startDate, endDate } = req.query;
+
+    // Verify bot ownership
+    const bot = await Bot.findOne({ _id: botId, user: req.userId });
+    if (!bot) {
+      return res.status(404).json({ error: 'Bot not found' });
+    }
+
+    const report = await analyticsService.generateReport(
+      botId,
+      startDate || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+      endDate || new Date()
+    );
+
+    res.json({
+      success: true,
+      report
+    });
+  } catch (error) {
+    console.error('Error fetching bot analytics:', error);
+    res.status(500).json({
+      error: 'Error fetching analytics'
+    });
+  }
+};
+
+// Get conversation history
+exports.getConversations = async (req, res) => {
+  try {
+    const { botId } = req.params;
+    const { status, page = 1, limit = 20 } = req.query;
+
+    // Verify bot ownership
+    const bot = await Bot.findOne({ _id: botId, user: req.userId });
+    if (!bot) {
+      return res.status(404).json({ error: 'Bot not found' });
+    }
+
+    const query = { botId };
+    if (status) {
+      query.status = status;
+    }
+
+    const conversations = await Conversation.find(query)
+      .sort('-lastActivity')
+      .limit(limit * 1)
+      .skip((page - 1) * limit)
+      .select('-messages');
+
+    const total = await Conversation.countDocuments(query);
+
+    res.json({
+      success: true,
+      conversations,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching conversations:', error);
+    res.status(500).json({
+      error: 'Error fetching conversations'
+    });
+  }
+};
+
+// Get single conversation details
+exports.getConversationDetail = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    const conversation = await Conversation.findById(conversationId)
+      .populate('currentFlow', 'name');
+
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    // Verify bot ownership
+    const bot = await Bot.findOne({ 
+      _id: conversation.botId, 
+      user: req.userId 
+    });
+    
+    if (!bot) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    res.json({
+      success: true,
+      conversation
+    });
+  } catch (error) {
+    console.error('Error fetching conversation detail:', error);
+    res.status(500).json({
+      error: 'Error fetching conversation'
+    });
+  }
+};
+
+// Export analytics data
+exports.exportAnalytics = async (req, res) => {
+  try {
+    const { botId } = req.params;
+    const { format = 'json', startDate, endDate } = req.query;
+
+    // Verify bot ownership
+    const bot = await Bot.findOne({ _id: botId, user: req.userId });
+    if (!bot) {
+      return res.status(404).json({ error: 'Bot not found' });
+    }
+
+    const report = await analyticsService.generateReport(
+      botId,
+      startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+      endDate || new Date()
+    );
+
+    if (format === 'csv') {
+      // Convert to CSV format
+      const csv = convertToCSV(report);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename=analytics-${botId}.csv`);
+      res.send(csv);
+    } else {
+      res.json(report);
+    }
+  } catch (error) {
+    console.error('Error exporting analytics:', error);
+    res.status(500).json({
+      error: 'Error exporting analytics'
+    });
+  }
+};
+
+// Helper function to convert report to CSV
+function convertToCSV(report) {
+  let csv = 'Metric,Value\n';
+  csv += `Total Messages,${report.summary.totalMessages}\n`;
+  csv += `Total Conversations,${report.summary.totalConversations}\n`;
+  csv += `Unique Users,${report.summary.uniqueUsers}\n`;
+  csv += `Avg Messages Per Conversation,${report.summary.avgMessagesPerConversation}\n`;
+  csv += `Satisfaction Score,${report.satisfaction.score}%\n`;
+  
+  return csv;
+}
+```
+
+## 2️⃣ NUEVOS TIPOS DE NODOS
+
+### 📦 backend/models/Flow.js (actualización)
+
+```javascript
+// Agregar estos tipos de nodos al schema existente
+const nodeSchema = new mongoose.Schema({
+  id: {
+    type: String,
+    required: true
+  },
+  type: {
+    type: String,
+    enum: [
+      'message', 'question', 'button', 'list', 'media', 
+      'delay', 'condition', 'api', 'end',
+      // Nuevos tipos de nodos
+      'location', 'file', 'audio', 'video', 'contact',
+      'carousel', 'quickReply', 'form', 'payment',
+      'webhook', 'email', 'sms', 'ai', 'transfer'
+    ],
+    required: true
+  },
+  position: {
+    x: Number,
+    y: Number
+  },
+  data: {
+    label: String,
+    content: String,
+    options: [mongoose.Schema.Types.Mixed],
+    
+    // Para nodo de ubicación
+    latitude: Number,
+    longitude: Number,
+    address: String,
+    
+    // Para nodo de archivo
+    fileUrl: String,
+    fileName: String,
+    fileType: String,
+    maxSize: Number,
+    acceptedFormats: [String],
+    
+    // Para nodo de audio/video
+    mediaUrl: String,
+    mediaType: String,
+    duration: Number,
+    thumbnail: String,
+    
+    // Para nodo de contacto
+    contactName: String,
+    contactPhone: String,
+    contactEmail: String,
+    
+    // Para nodo carousel
+    cards: [{
+      title: String,
+      description: String,
+      imageUrl: String,
+      buttons: [{
+        text: String,
+        action: String,
+        payload: String
+      }]
+    }],
+    
+    // Para nodo de formulario
+    fields: [{
+      name: String,
+      type: String,
+      label: String,
+      required: Boolean,
+      validation: String,
+      options: [String]
+    }],
+    
+    // Para nodo de pago
+    amount: Number,
+    currency: String,
+    description: String,
+    paymentMethods: [String],
+    
+    // Para nodo webhook
+    webhookUrl: String,
+    method: String,
+    headers: mongoose.Schema.Types.Mixed,
+    body: mongoose.Schema.Types.Mixed,
+    timeout: Number,
+    
+    // Para nodo de email
+    emailTo: String,
+    emailSubject: String,
+    emailBody: String,
+    emailTemplate: String,
+    
+    // Para nodo SMS
+    smsTo: String,
+    smsBody: String,
+    smsProvider: String,
+    
+    // Para nodo AI
+    aiModel: String,
+    prompt: String,
+    maxTokens: Number,
+    temperature: Number,
+    
+    // Para nodo de transferencia
+    transferTo: String,
+    transferType: String, // 'agent', 'bot', 'department'
+    transferMessage: String,
+    
+    // Configuración común
+    delay: Number,
+    condition: String,
+    apiUrl: String,
+    apiMethod: String,
+    apiHeaders: mongoose.Schema.Types.Mixed,
+    apiBody: mongoose.Schema.Types.Mixed,
+    variables: [String],
+    errorHandler: String,
+    retryAttempts: Number
+  }
+});
+```
+
+### 📦 backend/services/nodeExecutors.js
+
+```javascript
+const axios = require('axios');
+const nodemailer = require('nodemailer');
+const twilio = require('twilio');
+const openai = require('openai');
+
+class NodeExecutors {
+  constructor() {
+    this.initializeServices();
+  }
+
+  initializeServices() {
+    // Email service
+    this.emailTransporter = nodemailer.createTransport({
+      service: process.env.EMAIL_SERVICE || 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD
+      }
+    });
+
+    // SMS service (Twilio)
+    if (process.env.TWILIO_ACCOUNT_SID) {
+      this.twilioClient = twilio(
+        process.env.TWILIO_ACCOUNT_SID,
+        process.env.TWILIO_AUTH_TOKEN
+      );
+    }
+
+    // AI service (OpenAI)
+    if (process.env.OPENAI_API_KEY) {
+      this.openaiClient = new openai({
+        apiKey: process.env.OPENAI_API_KEY
+      });
+    }
+  }
+
+  // Execute location node
+  async executeLocationNode(node, context, whatsappService, botId, userId) {
+    try {
+      const { latitude, longitude, address } = node.data;
+      
+      await whatsappService.sendLocation(botId, userId, {
+        latitude,
+        longitude,
+        address
+      });
+
+      return {
+        success: true,
+        context: {
+          ...context,
+          lastLocation: { latitude, longitude, address }
+        }
+      };
+    } catch (error) {
+      console.error('Error executing location node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute file node
+  async executeFileNode(node, context, whatsappService, botId, userId) {
+    try {
+      const { fileUrl, fileName, fileType } = node.data;
+      
+      await whatsappService.sendDocument(botId, userId, {
+        url: fileUrl,
+        filename: fileName,
+        mimetype: fileType
+      });
+
+      return {
+        success: true,
+        context: {
+          ...context,
+          lastFile: { url: fileUrl, name: fileName }
+        }
+      };
+    } catch (error) {
+      console.error('Error executing file node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute audio node
+  async executeAudioNode(node, context, whatsappService, botId, userId) {
+    try {
+      const { mediaUrl } = node.data;
+      
+      await whatsappService.sendAudio(botId, userId, {
+        url: mediaUrl,
+        ptt: true // voice note
+      });
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error executing audio node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute video node
+  async executeVideoNode(node, context, whatsappService, botId, userId) {
+    try {
+      const { mediaUrl, thumbnail } = node.data;
+      
+      await whatsappService.sendVideo(botId, userId, {
+        url: mediaUrl,
+        thumbnail,
+        caption: node.data.content
+      });
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error executing video node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute contact node
+  async executeContactNode(node, context, whatsappService, botId, userId) {
+    try {
+      const { contactName, contactPhone, contactEmail } = node.data;
+      
+      await whatsappService.sendContact(botId, userId, {
+        name: contactName,
+        phone: contactPhone,
+        email: contactEmail
+      });
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error executing contact node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute carousel node
+  async executeCarouselNode(node, context, whatsappService, botId, userId) {
+    try {
+      const { cards } = node.data;
+      
+      // Send each card as a separate message with buttons
+      for (const card of cards) {
+        await whatsappService.sendButtonMessage(botId, userId, {
+          text: `*${card.title}*\n${card.description}`,
+          footer: 'Seleccione una opción',
+          buttons: card.buttons.map((btn, index) => ({
+            buttonId: `${node.id}_${index}`,
+            buttonText: { displayText: btn.text },
+            type: 1
+          })),
+          headerType: card.imageUrl ? 1 : 0,
+          image: card.imageUrl
+        });
+      }
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error executing carousel node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute form node
+  async executeFormNode(node, context, whatsappService, botId, userId) {
+    try {
+      const { fields } = node.data;
+      
+      // Create form message
+      let formMessage = node.data.content || 'Por favor complete el siguiente formulario:\n\n';
+      
+      fields.forEach((field, index) => {
+        formMessage += `${index + 1}. ${field.label}${field.required ? ' *' : ''}\n`;
+      });
+
+      await whatsappService.sendMessage(botId, userId, formMessage);
+
+      // Store form state in context
+      return {
+        success: true,
+        context: {
+          ...context,
+          activeForm: {
+            nodeId: node.id,
+            fields,
+            responses: {},
+            currentField: 0
+          }
+        }
+      };
+    } catch (error) {
+      console.error('Error executing form node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute webhook node
+  async executeWebhookNode(node, context) {
+    try {
+      const { webhookUrl, method, headers, body, timeout } = node.data;
+      
+      const response = await axios({
+        url: webhookUrl,
+        method: method || 'POST',
+        headers: headers || {},
+        data: this.replaceVariables(body, context.variables),
+        timeout: timeout || 5000
+      });
+
+      return {
+        success: true,
+        context: {
+          ...context,
+          webhookResponse: response.data
+        }
+      };
+    } catch (error) {
+      console.error('Error executing webhook node:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Execute email node
+  async executeEmailNode(node, context) {
+    try {
+      const { emailTo, emailSubject, emailBody } = node.data;
+      
+      const mailOptions = {
+        from: process.env.EMAIL_FROM,
+        to: this.replaceVariables(emailTo, context.variables),
+        subject: this.replaceVariables(emailSubject, context.variables),
+        html: this.replaceVariables(emailBody, context.variables)
+      };
+
+      await this.emailTransporter.sendMail(mailOptions);
+
+      return { success:
